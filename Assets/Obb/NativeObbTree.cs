@@ -1,8 +1,4 @@
 using System.Collections.Generic;
-using System.Linq;
-using g3;
-using MathNet.Numerics.LinearAlgebra;
-using MathNet.Numerics.LinearAlgebra.Factorization;
 using Unity.Mathematics;
 using UnityEngine;
 
