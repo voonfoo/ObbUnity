@@ -1,41 +1,100 @@
-using System.Collections.Generic;
+using Unity.Burst;
+using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 
 namespace Voon.Obb
 {
-    public class NativeObbTree
+    [BurstCompile]
+    public static class NativeObbTree
     {
-        public NativeOrientedBox3D Bounds;
-        public Mesh unityMesh;
-
-        public void BuildFromCovarianceMatrix(float3x3 covarianceMatrix)
+        [BurstCompile]
+        public static void Build(ref NativeArray<float3> vertices, ref NativeArray<int> indices, ref NativeOrientedBox3D bounds)
         {
-            (float3 _, float3x3 eigenVector) = JacobiEVD(covarianceMatrix);
-            NormalizeRows(eigenVector, L2Norm(eigenVector));
+            float3 weightedMean = new float3();
+            float areaSum = 0;
+            float c00 = 0;
+            float c01 = 0;
+            float c02 = 0;
+            float c11 = 0;
+            float c12 = 0;
+            float c22 = 0;
 
-            var vertices = unityMesh.vertices;
-            var vertexIndices = new List<int>();
-            unityMesh.GetTriangles(vertexIndices, 0);
-
-            float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
-            float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
-            for (int i = 0; i < vertexIndices.Count; i += 3)
+            for (int i = 0; i < indices.Length; i += 3)
             {
                 float3 p = new float3();
-                Vector3 vertex = vertices[vertexIndices[i]];
+                float3 vertex = vertices[indices[i]];
                 p[0] = vertex.x;
                 p[1] = vertex.y;
                 p[2] = vertex.z;
 
                 float3 q = new float3();
-                vertex = vertices[vertexIndices[i + 1]];
+                vertex = vertices[indices[i + 1]];
                 q[0] = vertex.x;
                 q[1] = vertex.y;
                 q[2] = vertex.z;
 
                 float3 r = new float3();
-                vertex = vertices[vertexIndices[i + 2]];
+                vertex = vertices[indices[i + 2]];
+                r[0] = vertex.x;
+                r[1] = vertex.y;
+                r[2] = vertex.z;
+
+                float3 mean = (p + q + r) / 3.0f;
+                float area = math.length(math.cross((q - p), (r - p))) / 2.0f;
+                weightedMean += mean * area;
+                areaSum += area;
+                c00 += (9.0f * mean[0] * mean[0] + p[0] * p[0] + q[0] * q[0] + r[0] * r[0]) * (area / 12.0f);
+                c01 += (9.0f * mean[0] * mean[1] + p[0] * p[1] + q[0] * q[1] + r[0] * r[1]) * (area / 12.0f);
+                c02 += (9.0f * mean[0] * mean[2] + p[0] * p[2] + q[0] * q[2] + r[0] * r[2]) * (area / 12.0f);
+                c11 += (9.0f * mean[1] * mean[1] + p[1] * p[1] + q[1] * q[1] + r[1] * r[1]) * (area / 12.0f);
+                c12 += (9.0f * mean[1] * mean[2] + p[1] * p[2] + q[1] * q[2] + r[1] * r[2]) * (area / 12.0f);
+            }
+
+            weightedMean /= areaSum;
+            c00 /= areaSum;
+            c01 /= areaSum;
+            c02 /= areaSum;
+            c11 /= areaSum;
+            c12 /= areaSum;
+            c22 /= areaSum;
+
+            c00 -= weightedMean[0] * weightedMean[0];
+            c01 -= weightedMean[0] * weightedMean[1];
+            c02 -= weightedMean[0] * weightedMean[2];
+            c11 -= weightedMean[1] * weightedMean[1];
+            c12 -= weightedMean[1] * weightedMean[2];
+            c22 -= weightedMean[2] * weightedMean[2];
+
+            float3x3 covarianceMatrix = new float3x3(c00, c01, c02, c01, c11, c12, c02, 0, c22);
+            BuildFromCovarianceMatrix(ref vertices, ref indices, ref covarianceMatrix, ref bounds);
+        }
+
+        [BurstCompile]
+        private static void BuildFromCovarianceMatrix(ref NativeArray<float3> vertices,
+            ref NativeArray<int> indices,
+            ref float3x3 covarianceMatrix, ref NativeOrientedBox3D bounds)
+        {
+            (float3 _, float3x3 eigenVector) = JacobiEvd(covarianceMatrix);
+
+            float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
+            float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
+            for (int i = 0; i < indices.Length; i += 3)
+            {
+                float3 p = new float3();
+                Vector3 vertex = vertices[indices[i]];
+                p[0] = vertex.x;
+                p[1] = vertex.y;
+                p[2] = vertex.z;
+
+                float3 q = new float3();
+                vertex = vertices[indices[i + 1]];
+                q[0] = vertex.x;
+                q[1] = vertex.y;
+                q[2] = vertex.z;
+
+                float3 r = new float3();
+                vertex = vertices[indices[i + 2]];
                 r[0] = vertex.x;
                 r[1] = vertex.y;
                 r[2] = vertex.z;
@@ -72,80 +131,13 @@ namespace Voon.Obb
             float3 min = new float3(minX, minY, minZ);
             float3 max = new float3(maxX, maxY, maxZ);
 
-            Bounds = new NativeOrientedBox3D()
-            {
-                Min = min,
-                Max = max,
-                Rotation = math.transpose(eigenVector)
-            };
+            bounds.Min = min;
+            bounds.Max = max;
+            bounds.Rotation = math.transpose(eigenVector);
         }
 
-        public void Build()
-        {
-            float3 weightedMean = new float3();
-            float areaSum = 0;
-            float c00 = 0;
-            float c01 = 0;
-            float c02 = 0;
-            float c11 = 0;
-            float c12 = 0;
-            float c22 = 0;
 
-            var vertices = unityMesh.vertices;
-            var vertexIndices = new List<int>();
-            unityMesh.GetTriangles(vertexIndices, 0);
-
-            for (int i = 0; i < vertexIndices.Count; i += 3)
-            {
-                float3 p = new float3();
-                Vector3 vertex = vertices[vertexIndices[i]];
-                p[0] = vertex.x;
-                p[1] = vertex.y;
-                p[2] = vertex.z;
-
-                float3 q = new float3();
-                vertex = vertices[vertexIndices[i + 1]];
-                q[0] = vertex.x;
-                q[1] = vertex.y;
-                q[2] = vertex.z;
-
-                float3 r = new float3();
-                vertex = vertices[vertexIndices[i + 2]];
-                r[0] = vertex.x;
-                r[1] = vertex.y;
-                r[2] = vertex.z;
-
-                float3 mean = (p + q + r) / 3.0f;
-                float area = math.length(math.cross((q - p), (r - p))) / 2.0f;
-                weightedMean += mean * area;
-                areaSum += area;
-                c00 += (9.0f * mean[0] * mean[0] + p[0] * p[0] + q[0] * q[0] + r[0] * r[0]) * (area / 12.0f);
-                c01 += (9.0f * mean[0] * mean[1] + p[0] * p[1] + q[0] * q[1] + r[0] * r[1]) * (area / 12.0f);
-                c02 += (9.0f * mean[0] * mean[2] + p[0] * p[2] + q[0] * q[2] + r[0] * r[2]) * (area / 12.0f);
-                c11 += (9.0f * mean[1] * mean[1] + p[1] * p[1] + q[1] * q[1] + r[1] * r[1]) * (area / 12.0f);
-                c12 += (9.0f * mean[1] * mean[2] + p[1] * p[2] + q[1] * q[2] + r[1] * r[2]) * (area / 12.0f);
-            }
-
-            weightedMean /= areaSum;
-            c00 /= areaSum;
-            c01 /= areaSum;
-            c02 /= areaSum;
-            c11 /= areaSum;
-            c12 /= areaSum;
-            c22 /= areaSum;
-
-            c00 -= weightedMean[0] * weightedMean[0];
-            c01 -= weightedMean[0] * weightedMean[1];
-            c02 -= weightedMean[0] * weightedMean[2];
-            c11 -= weightedMean[1] * weightedMean[1];
-            c12 -= weightedMean[1] * weightedMean[2];
-            c22 -= weightedMean[2] * weightedMean[2];
-
-            float3x3 covarianceMatrix = new float3x3(c00, c01, c02, c01, c11, c12, c02, 0, c22);
-            BuildFromCovarianceMatrix(covarianceMatrix);
-        }
-
-        public float L2Norm(float3x3 matrix)
+        private static float L2Norm(float3x3 matrix)
         {
             float sum = 0;
             sum += matrix.c0.x * matrix.c0.x;
@@ -160,7 +152,7 @@ namespace Voon.Obb
             return math.sqrt(sum);
         }
 
-        public float3x3 NormalizeRows(float3x3 eigenVector, float p)
+        private static float3x3 NormalizeRows(float3x3 eigenVector, float p)
         {
             float3 r1 = new float3(eigenVector.c0.x, eigenVector.c1.x, eigenVector.c2.x);
             float3 r2 = new float3(eigenVector.c0.y, eigenVector.c1.y, eigenVector.c2.y);
@@ -174,11 +166,11 @@ namespace Voon.Obb
                 new float3(r1.z, r2.z, r3.z));
         }
 
-        public (float3 eigenvalues, float3x3 eigenvectors) JacobiEVD(float3x3 A)
+        private static (float3 eigenvalues, float3x3 eigenvectors) JacobiEvd(float3x3 A)
         {
             float3x3 V = float3x3.identity;
-            const int maxIterations = 100;
-            const float eps = 1e-10f;
+            int maxIterations = 100;
+            float eps = 1e-10f;
 
             for (int iter = 0; iter < maxIterations; iter++)
             {
